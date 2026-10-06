@@ -26,6 +26,53 @@ function mapError(status: number, message: string): string {
   return message || "ট্রান্সক্রিপশন হয়নি।";
 }
 
+function providerOptionsForModel(model: string): Record<string, unknown> | undefined {
+  // Keep fillers (umm / uh / aaa) — Gemini SMART / Azure "clean" strip them.
+  if (model.startsWith("google/gemini") || model.includes("gemini-3.5-transcribe")) {
+    return {
+      "google-ai-studio": {
+        audioTranscriptionConfig: {
+          mode: "VERBATIM",
+          wordTimestamp: true,
+        },
+      },
+    };
+  }
+  if (model.startsWith("microsoft/mai-transcribe")) {
+    return {
+      azure: {
+        enhancedMode: {
+          modelOptions: {
+            // verbatim keeps disfluencies; clean removes them
+            transcribeStyle: "verbatim",
+          },
+        },
+      },
+    };
+  }
+  return undefined;
+}
+
+function buildRequestBody(options: {
+  model: string;
+  data: string;
+  format: string;
+  language?: string;
+  responseFormat: "verbose_json" | "json";
+}) {
+  const providerOptions = providerOptionsForModel(options.model);
+  return {
+    model: options.model,
+    input_audio: { data: options.data, format: options.format },
+    ...(options.language ? { language: options.language } : {}),
+    response_format: options.responseFormat,
+    ...(options.responseFormat === "verbose_json"
+      ? { timestamp_granularities: ["word", "segment"] }
+      : {}),
+    ...(providerOptions ? { provider: { options: providerOptions } } : {}),
+  };
+}
+
 export type TranscribeResult = Transcript & { usage?: OpenRouterUsage };
 
 /** Browser → OpenRouter STT (avoids Vercel body limit). */
@@ -49,13 +96,15 @@ export async function transcribeChunkWithOpenRouter(options: {
         typeof window !== "undefined" ? window.location.origin : "https://shobdo.app",
       "X-Title": "Shobdo OpenRouter",
     },
-    body: JSON.stringify({
-      model,
-      input_audio: { data, format },
-      ...(language ? { language } : {}),
-      response_format: "verbose_json",
-      timestamp_granularities: ["word", "segment"],
-    }),
+    body: JSON.stringify(
+      buildRequestBody({
+        model,
+        data,
+        format,
+        language,
+        responseFormat: "verbose_json",
+      }),
+    ),
   });
 
   const raw = await response.text();
@@ -83,12 +132,15 @@ export async function transcribeChunkWithOpenRouter(options: {
           typeof window !== "undefined" ? window.location.origin : "https://shobdo.app",
         "X-Title": "Shobdo OpenRouter",
       },
-      body: JSON.stringify({
-        model,
-        input_audio: { data, format },
-        ...(language ? { language } : {}),
-        response_format: "json",
-      }),
+      body: JSON.stringify(
+        buildRequestBody({
+          model,
+          data,
+          format,
+          language,
+          responseFormat: "json",
+        }),
+      ),
     });
     const plainRaw = await plain.text();
     let plainPayload: OpenRouterTranscription;
@@ -106,7 +158,8 @@ export async function transcribeChunkWithOpenRouter(options: {
   }
 
   const parsed = parseOpenRouterTranscript(payload);
-  const words = normalizeWords(parsed.words);
+  // Don't collapse filler runs like "um um um" the same way as Whisper loops.
+  const words = normalizeWords(parsed.words, { preserveFillers: true });
   const text = parsed.text || wordsToText(words);
   const duration =
     parsed.duration ?? (words.length > 0 ? words.at(-1)!.end : undefined);
