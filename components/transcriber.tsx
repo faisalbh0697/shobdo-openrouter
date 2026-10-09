@@ -26,6 +26,7 @@ import { Label } from "@/components/ui/label";
 import {
   activeWordIndex,
   applyRemovals,
+  groupSentences,
   formatBytes,
   formatTimestamp,
   isAllowedAudio,
@@ -111,12 +112,27 @@ export function Transcriber() {
   const [history, setHistory] = useState<ReadonlySet<number>[]>([]);
   const [skipRemoved, setSkipRemoved] = useState(true);
   const anchorRef = useRef<number | null>(null);
+  const dragRef = useRef<{ anchor: number; remove: boolean; base: ReadonlySet<number> } | null>(
+    null,
+  );
 
   const audioRef = useRef<HTMLAudioElement>(null);
   const activeWordRef = useRef<HTMLButtonElement>(null);
   const audioUrlRef = useRef<string | null>(null);
   const requestId = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const endDrag = () => {
+      dragRef.current = null;
+    };
+    window.addEventListener("pointerup", endDrag);
+    window.addEventListener("pointercancel", endDrag);
+    return () => {
+      window.removeEventListener("pointerup", endDrag);
+      window.removeEventListener("pointercancel", endDrag);
+    };
+  }, []);
 
   useEffect(() => {
     loadApiKey();
@@ -197,6 +213,42 @@ export function Transcriber() {
     setRemoved(next);
   }
 
+  /** Mouse-down on a word starts a drag-select; every word swept over is cut (or restored). */
+  function startDrag(index: number, extend: boolean) {
+    const anchor = extend && anchorRef.current != null ? anchorRef.current : index;
+    dragRef.current = { anchor, remove: !removed.has(index), base: removed };
+    anchorRef.current = index;
+    setHistory((past) => [...past, removed]);
+    paintDrag(index);
+  }
+
+  function paintDrag(index: number) {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const next = new Set(drag.base);
+    const from = Math.min(drag.anchor, index);
+    const to = Math.max(drag.anchor, index);
+    for (let i = from; i <= to; i++) {
+      if (drag.remove) next.add(i);
+      else next.delete(i);
+    }
+    setRemoved(next);
+  }
+
+  /** Cut a whole sentence, or bring it back if it is already fully cut. */
+  function toggleSentence(from: number, to: number) {
+    const next = new Set(removed);
+    let allCut = true;
+    for (let i = from; i <= to; i++) if (!removed.has(i)) allCut = false;
+    for (let i = from; i <= to; i++) {
+      if (allCut) next.delete(i);
+      else next.add(i);
+    }
+    anchorRef.current = null;
+    setHistory((past) => [...past, removed]);
+    setRemoved(next);
+  }
+
   function undoRemoval() {
     const previous = history.at(-1);
     if (!previous) return;
@@ -214,6 +266,11 @@ export function Transcriber() {
     while (index < words.length && removed.has(index)) index++;
     audio.currentTime = index < words.length ? words[index].start : (audio.duration || time);
   }
+
+  const sentences = useMemo(
+    () => (transcript ? groupSentences(transcript.words) : []),
+    [transcript],
+  );
 
   const edited = useMemo(
     () => (transcript ? applyRemovals(transcript, removed) : null),
@@ -699,7 +756,7 @@ export function Transcriber() {
           <div className="flex flex-wrap items-center gap-2 rounded-xl bg-red-50 px-4 py-2.5 text-sm text-red-900 ring-1 ring-red-200">
             <span className="min-w-0 flex-1">
               {editing
-                ? "শব্দে ক্লিক করলে কেটে যাবে, আবার ক্লিক করলে ফেরত আসবে। Shift+ক্লিকে একসাথে অনেকগুলো।"
+                ? "শব্দে ক্লিক করলে বা মাউস টেনে সিলেক্ট করলে কেটে যাবে, আবার করলে ফেরত আসবে।"
                 : `${removed.size}টা শব্দ কাটা আছে — কপি/ডাউনলোডে এগুলো থাকবে না।`}
             </span>
             <label className="inline-flex items-center gap-1.5 text-xs">
@@ -806,34 +863,86 @@ export function Transcriber() {
           ) : null}
 
           {transcript && wordCount > 0 && view === "reading" ? (
-            <div className="flex flex-wrap content-start gap-x-1 gap-y-1 p-4 sm:p-6">
-              {transcript.words.map((word, index) => {
-                const active = index === activeIndex;
-                const played = activeIndex > index;
-                const cut = removed.has(index);
+            <div className="flex flex-col divide-y divide-foreground/5 px-2 py-2 sm:px-4">
+              {sentences.map(({ from, to }) => {
+                const first = transcript.words[from];
+                const sentenceCut = Array.from(
+                  { length: to - from + 1 },
+                  (_, offset) => from + offset,
+                ).every((index) => removed.has(index));
                 return (
-                  <button
-                    key={`${word.start}-${index}`}
-                    ref={active ? activeWordRef : undefined}
-                    type="button"
-                    title={`${formatTimestamp(word.start)} – ${formatTimestamp(word.end)}`}
-                    aria-current={active ? "true" : undefined}
-                    aria-pressed={editing ? cut : undefined}
-                    onClick={(event) =>
-                      editing ? toggleWord(index, event.shiftKey) : seek(word.start)
-                    }
-                    className={cn(
-                      "rounded-md px-1.5 py-0.5 text-left text-[1.05rem] leading-8 transition-colors select-none",
-                      cut && "text-red-500/70 line-through decoration-red-500 decoration-2",
-                      cut && editing && "bg-red-50 hover:bg-red-100",
-                      !cut && editing && "hover:bg-red-50 hover:text-red-700",
-                      !cut && active && "bg-stone-900 text-white",
-                      !cut && !editing && !active && played && "text-stone-400 hover:bg-stone-100 hover:text-stone-900",
-                      !cut && !editing && !active && !played && "hover:bg-stone-100",
-                    )}
+                  <div
+                    key={`${first.start}-${from}`}
+                    className="grid grid-cols-[4.5rem_minmax(0,1fr)] gap-2 py-2 sm:gap-3"
                   >
-                    {word.word}
-                  </button>
+                    <div className="flex flex-col items-start gap-1 pt-1.5">
+                      <button
+                        type="button"
+                        onClick={() => seek(first.start)}
+                        className="rounded px-1 font-mono text-xs text-muted-foreground hover:bg-stone-100 hover:text-foreground"
+                      >
+                        {formatTimestamp(first.start)}
+                      </button>
+                      {editing ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleSentence(from, to)}
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded px-1 text-[11px]",
+                            sentenceCut
+                              ? "text-red-700 hover:bg-red-100"
+                              : "text-muted-foreground hover:bg-red-50 hover:text-red-700",
+                          )}
+                        >
+                          {sentenceCut ? <RotateCcw className="size-3" /> : <Scissors className="size-3" />}
+                          {sentenceCut ? "ফেরত" : "বাক্য কাটুন"}
+                        </button>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap content-start gap-x-1 gap-y-1">
+                      {transcript.words.slice(from, to + 1).map((word, offset) => {
+                        const index = from + offset;
+                        const active = index === activeIndex;
+                        const played = activeIndex > index;
+                        const cut = removed.has(index);
+                        return (
+                          <button
+                            key={`${word.start}-${index}`}
+                            ref={active ? activeWordRef : undefined}
+                            type="button"
+                            title={`${formatTimestamp(word.start)} – ${formatTimestamp(word.end)}`}
+                            aria-current={active ? "true" : undefined}
+                            aria-pressed={editing ? cut : undefined}
+                            onPointerDown={(event) => {
+                              if (!editing || event.button !== 0) return;
+                              event.preventDefault();
+                              startDrag(index, event.shiftKey);
+                            }}
+                            onPointerEnter={() => {
+                              if (editing) paintDrag(index);
+                            }}
+                            onClick={(event) => {
+                              // Pointer clicks are handled by the drag; keyboard (detail 0) toggles.
+                              if (!editing) seek(word.start);
+                              else if (event.detail === 0) toggleWord(index, event.shiftKey);
+                            }}
+                            className={cn(
+                              "rounded-md px-1.5 py-0.5 text-left text-[1.05rem] leading-8 transition-colors select-none",
+                              cut &&
+                                "bg-red-50 text-red-600 underline decoration-red-500 decoration-[3px] underline-offset-[7px]",
+                              cut && editing && "hover:bg-red-100",
+                              !cut && editing && "hover:bg-red-50 hover:text-red-700",
+                              !cut && active && "bg-stone-900 text-white",
+                              !cut && !editing && !active && played && "text-stone-400 hover:bg-stone-100 hover:text-stone-900",
+                              !cut && !editing && !active && !played && "hover:bg-stone-100",
+                            )}
+                          >
+                            {word.word}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 );
               })}
             </div>
@@ -859,7 +968,7 @@ export function Transcriber() {
                         key={`${word.start}-${index}`}
                         className={cn(
                           "border-b last:border-0",
-                          cut && "text-red-500/70 line-through",
+                          cut && "bg-red-50 text-red-600",
                           !cut && active && "bg-stone-900 text-white",
                         )}
                       >

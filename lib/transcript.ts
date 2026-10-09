@@ -200,6 +200,40 @@ export function activeWordIndex(
   });
 }
 
+export type Sentence = { from: number; to: number };
+
+const SENTENCE_END_RE = /[।?!.…]["'”’)]*$/u;
+
+/**
+ * Split words into sentences (inclusive index ranges). Bangla STT output often
+ * has no দাঁড়ি, so a pause between words also ends a sentence, and very long
+ * runs are cut so a line never grows unbounded.
+ */
+export function groupSentences(
+  words: TranscriptWord[],
+  options?: { pauseSeconds?: number; minWords?: number; maxWords?: number },
+): Sentence[] {
+  const pause = options?.pauseSeconds ?? 0.6;
+  const minWords = options?.minWords ?? 3;
+  const maxWords = options?.maxWords ?? 25;
+  const sentences: Sentence[] = [];
+  let from = 0;
+  words.forEach((word, index) => {
+    const next = words[index + 1];
+    const length = index - from + 1;
+    const ends =
+      !next ||
+      SENTENCE_END_RE.test(word.word) ||
+      (length >= minWords && next.start - word.end >= pause) ||
+      length >= maxWords;
+    if (ends) {
+      sentences.push({ from, to: index });
+      from = index + 1;
+    }
+  });
+  return sentences;
+}
+
 /** Drop words the user struck out in the editor and rebuild the text. */
 export function applyRemovals(transcript: Transcript, removed: ReadonlySet<number>): Transcript {
   if (removed.size === 0) return transcript;
