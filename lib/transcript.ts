@@ -200,6 +200,13 @@ export function activeWordIndex(
   });
 }
 
+/** Drop words the user struck out in the editor and rebuild the text. */
+export function applyRemovals(transcript: Transcript, removed: ReadonlySet<number>): Transcript {
+  if (removed.size === 0) return transcript;
+  const words = transcript.words.filter((_, index) => !removed.has(index));
+  return { ...transcript, words, text: wordsToText(words) };
+}
+
 export function transcriptToTimedText(transcript: Transcript): string {
   return transcript.words
     .map((word) => `${formatTimestamp(word.start)}\t${word.word}`)
